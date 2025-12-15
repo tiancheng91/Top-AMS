@@ -1,0 +1,141 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'  # 匹配 v 开头的标签，如 v1.0.0
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install ESP-IDF
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.3.2
+          target: esp32c3
+          required_components: ""
+      
+      - name: Get tag name
+        id: tag
+        run: echo "name=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      
+      - name: Build MOTORS_4 version
+        run: |
+          # 备份原始 config.hpp
+          cp main/config.hpp main/config.hpp.backup
+          
+          # 配置 MOTORS_4: 确保 MOTORS_4 已定义，MOTORS_6 已注释
+          # 如果 MOTORS_4 被注释，取消注释
+          sed -i 's|^// #define MOTORS_4|#define MOTORS_4|' main/config.hpp || true
+          # 如果 MOTORS_6 已定义，则注释掉
+          sed -i 's|^#define MOTORS_6\(.*\)|// #define MOTORS_6\1|' main/config.hpp || true
+          
+          # 设置目标芯片
+          idf.py set-target esp32c3
+          
+          # 构建
+          idf.py build
+          
+          # 合并二进制文件
+          python -m esptool --chip esp32c3 merge_bin -o Top-AMS-MOTORS_4.bin \
+            --flash_mode dio --flash_freq 80m --flash_size 4MB \
+            0x0 build/bootloader/bootloader.bin \
+            0x10000 build/Top-AMS.bin \
+            0x8000 build/partition_table/partition-table.bin
+          
+          # 恢复原始配置
+          mv main/config.hpp.backup main/config.hpp
+          
+          # 清理构建目录
+          idf.py fullclean
+      
+      - name: Build MOTORS_6 version
+        run: |
+          # 备份原始 config.hpp
+          cp main/config.hpp main/config.hpp.backup
+          
+          # 配置 MOTORS_6: 注释掉 MOTORS_4，确保 MOTORS_6 已定义
+          # 如果 MOTORS_4 已定义，则注释掉
+          sed -i 's|^#define MOTORS_4\(.*\)|// #define MOTORS_4\1|' main/config.hpp || true
+          # 如果 MOTORS_6 被注释，取消注释
+          sed -i 's|^// #define MOTORS_6|#define MOTORS_6|' main/config.hpp || true
+          
+          # 设置目标芯片
+          idf.py set-target esp32c3
+          
+          # 构建
+          idf.py build
+          
+          # 合并二进制文件
+          python -m esptool --chip esp32c3 merge_bin -o Top-AMS-MOTORS_6.bin \
+            --flash_mode dio --flash_freq 80m --flash_size 4MB \
+            0x0 build/bootloader/bootloader.bin \
+            0x10000 build/Top-AMS.bin \
+            0x8000 build/partition_table/partition-table.bin
+          
+          # 恢复原始配置
+          mv main/config.hpp.backup main/config.hpp
+          
+          # 清理构建目录
+          idf.py fullclean
+      
+      - name: Build CHANNELS_8 version
+        run: |
+          # 备份原始 config.hpp
+          cp main/config.hpp main/config.hpp.backup
+          
+          # 配置 CHANNELS_8: 注释掉所有宏定义（都不定义就是8通道）
+          # 如果 MOTORS_4 已定义，则注释掉
+          sed -i 's|^#define MOTORS_4\(.*\)|// #define MOTORS_4\1|' main/config.hpp || true
+          # 如果 MOTORS_6 已定义，则注释掉
+          sed -i 's|^#define MOTORS_6\(.*\)|// #define MOTORS_6\1|' main/config.hpp || true
+          
+          # 设置目标芯片
+          idf.py set-target esp32c3
+          
+          # 构建
+          idf.py build
+          
+          # 合并二进制文件
+          python -m esptool --chip esp32c3 merge_bin -o Top-AMS-CHANNELS_8.bin \
+            --flash_mode dio --flash_freq 80m --flash_size 4MB \
+            0x0 build/bootloader/bootloader.bin \
+            0x10000 build/Top-AMS.bin \
+            0x8000 build/partition_table/partition-table.bin
+          
+          # 恢复原始配置
+          mv main/config.hpp.backup main/config.hpp
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: Release ${{ steps.tag.outputs.name }}
+          body: |
+            ## 版本说明
+            
+            本次发布包含以下三个版本的固件：
+            - **MOTORS_4**: 4通道版本
+            - **MOTORS_6**: 6通道版本
+            - **CHANNELS_8**: 8通道版本（其它）
+            
+            ## 使用说明
+            
+            请根据您的硬件配置选择对应的固件进行刷入。
+          files: |
+            Top-AMS-MOTORS_4.bin
+            Top-AMS-MOTORS_6.bin
+            Top-AMS-CHANNELS_8.bin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

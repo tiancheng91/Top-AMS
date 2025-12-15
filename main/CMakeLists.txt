@@ -30,10 +30,23 @@ else()
     message(STATUS "No MOTOR_CONFIG specified, using default (MOTORS_8)")
 endif()
 
+# 确定通道数量
+if(DEFINED MOTOR_CONFIG)
+    if(MOTOR_CONFIG STREQUAL "MOTORS_4")
+        set(CHANNEL_COUNT 4)
+    elseif(MOTOR_CONFIG STREQUAL "MOTORS_6")
+        set(CHANNEL_COUNT 6)
+    else()
+        set(CHANNEL_COUNT 8)  # MOTORS_8 或默认
+    endif()
+else()
+    set(CHANNEL_COUNT 8)  # 默认8通道
+endif()
+
 # 添加自定义目标执行Python脚本
 add_custom_target(
     run_helloworld ALL  # ALL表示包含在默认构建目标中
-    COMMAND ${CMAKE_COMMAND} -E env PYTHONPATH= python ${CMAKE_CURRENT_SOURCE_DIR}/convert_html_to_hpp.py
+    COMMAND ${CMAKE_COMMAND} -E env PYTHONPATH= MOTOR_CONFIG=${MOTOR_CONFIG} CHANNEL_COUNT=${CHANNEL_COUNT} python ${CMAKE_CURRENT_SOURCE_DIR}/convert_html_to_hpp.py
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}  # 设置工作目录为脚本所在位置
-    COMMENT "RUN convert_html_to_hpp.py..."  # 可选：添加构建时的提示信息
+    COMMENT "RUN convert_html_to_hpp.py with CHANNEL_COUNT=${CHANNEL_COUNT}..."  # 可选：添加构建时的提示信息
 )

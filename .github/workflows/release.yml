@@ -31,9 +31,6 @@ jobs:
       
       - name: Build MOTORS_4 version
         run: |
-          # 设置目标芯片
-          idf.py set-target esp32c3
-          
           # 构建（通过 CMake 变量指定配置）
           idf.py build -DMOTOR_CONFIG=MOTORS_4
           
@@ -49,9 +46,6 @@ jobs:
       
       - name: Build MOTORS_6 version
         run: |
-          # 设置目标芯片
-          idf.py set-target esp32c3
-          
           # 构建（通过 CMake 变量指定配置）
           idf.py build -DMOTOR_CONFIG=MOTORS_6
           
@@ -67,9 +61,6 @@ jobs:
       
       - name: Build MOTORS_8 version
         run: |
-          # 设置目标芯片
-          idf.py set-target esp32c3
-          
           # 构建（通过 CMake 变量指定配置，MOTORS_8 不定义任何宏）
           idf.py build -DMOTOR_CONFIG=MOTORS_8
           

@@ -409,6 +409,72 @@
             color: var(--secondary-color);
         }
 
+        .status-display {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 16px;
+            padding: 12px 16px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            flex-wrap: wrap;
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+        }
+
+        .status-item label {
+            color: #7f8c8d;
+            font-weight: 500;
+        }
+
+        .status-item .status-value {
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-weight: 600;
+            background: #fff;
+            border: 1px solid #e0e0e0;
+        }
+
+        .status-value.idle {
+            color: var(--success-color);
+        }
+
+        .status-value.changing {
+            color: var(--warning-color);
+        }
+
+        .status-value.loading {
+            color: var(--secondary-color);
+        }
+
+        .status-value.locked {
+            color: var(--danger-color);
+        }
+
+        .btn:disabled,
+        .action-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            pointer-events: none;
+        }
+
+        .motor-running {
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.6;
+            }
+        }
+
         .help-text {
             font-size: 12px;
             color: #7f8c8d;
@@ -542,6 +608,21 @@
 
         <!-- 通道管理面板 -->
         <div id="channel-panel" class="panel-content hidden">
+            <div class="status-display">
+                <div class="status-item">
+                    <label>系统状态:</label>
+                    <span class="status-value" id="operation-status">空闲</span>
+                </div>
+                <div class="status-item">
+                    <label>系统锁定:</label>
+                    <span class="status-value" id="system-locked">未锁定</span>
+                </div>
+                <div class="status-item">
+                    <label>电机运行:</label>
+                    <span class="status-value" id="motor-running">无</span>
+                </div>
+            </div>
+
             <div class="channel-controls">
                 <!-- <div class="control-group">
                     <label for="load_time">进料时间 (ms):</label>
@@ -722,6 +803,52 @@
             addLog('WebSocket连接已关闭', 'warning');
         };
 
+        // 状态变量
+        let systemLocked = false;
+        let motorRunning = 0;
+        let operationStatus = 'idle';
+
+        // 更新按钮状态
+        function updateButtonStates() {
+            const allMotorButtons = document.querySelectorAll('.btn.primary, .btn.warning, .btn.success');
+            const isLocked = systemLocked || operationStatus !== 'idle';
+
+            allMotorButtons.forEach(btn => {
+                const onclick = btn.getAttribute('onclick');
+                if (onclick) {
+                    // 提取电机ID和命令类型
+                    const motorMatch = onclick.match(/sendCommand\(['"](motor_forward|motor_backward|load_filament)['"],\s*(\d+)\)/);
+                    if (motorMatch) {
+                        const command = motorMatch[1];
+                        const motorId = parseInt(motorMatch[2]);
+                        const isThisMotorRunning = motorRunning === motorId;
+                        
+                        // 如果系统锁定、操作进行中或该电机正在运行，禁用按钮
+                        btn.disabled = isLocked || isThisMotorRunning;
+                        
+                        // 添加视觉反馈
+                        if (isThisMotorRunning) {
+                            btn.classList.add('motor-running');
+                            btn.title = `通道 ${motorId} 正在运行`;
+                        } else if (isLocked) {
+                            btn.classList.remove('motor-running');
+                            btn.title = operationStatus === 'changing' ? '系统换料中' : 
+                                        operationStatus === 'loading' ? '系统上料中' : '系统锁定中';
+                        } else {
+                            btn.classList.remove('motor-running');
+                            btn.title = '';
+                        }
+                    }
+                }
+            });
+            
+            // 同时禁用当前通道选择器（如果系统锁定）
+            const extruderSelect = document.getElementById('extruder');
+            if (extruderSelect) {
+                extruderSelect.disabled = isLocked;
+            }
+        }
+
         ws.onmessage = function (event) {
             const doc = JSON.parse(event.data);
             if (doc.data) {
@@ -737,6 +864,39 @@
                             mqttDot.classList.remove('connected');
                             addLog('MQTT连接失败', 'error');
                         }
+                    } else if (item.name == 'system_locked') {
+                        systemLocked = item.value;
+                        const lockedEl = document.getElementById('system-locked');
+                        if (lockedEl) {
+                            lockedEl.textContent = item.value ? '已锁定' : '未锁定';
+                            lockedEl.className = 'status-value ' + (item.value ? 'locked' : 'idle');
+                        }
+                        updateButtonStates();
+                    } else if (item.name == 'motor_running') {
+                        motorRunning = item.value || 0;
+                        const motorEl = document.getElementById('motor-running');
+                        if (motorEl) {
+                            motorEl.textContent = motorRunning > 0 ? `通道 ${motorRunning}` : '无';
+                            if (motorRunning > 0) {
+                                motorEl.classList.add('motor-running');
+                            } else {
+                                motorEl.classList.remove('motor-running');
+                            }
+                        }
+                        updateButtonStates();
+                    } else if (item.name == 'operation_status') {
+                        operationStatus = item.value || 'idle';
+                        const statusEl = document.getElementById('operation-status');
+                        if (statusEl) {
+                            const statusMap = {
+                                'idle': '空闲',
+                                'changing': '换料中',
+                                'loading': '上料中'
+                            };
+                            statusEl.textContent = statusMap[operationStatus] || operationStatus;
+                            statusEl.className = 'status-value ' + operationStatus;
+                        }
+                        updateButtonStates();
                     } else {
                         const element = document.getElementById(item.name);
                         const propertyPriority = ['value', 'textContent', 'innerHTML'];
@@ -746,7 +906,8 @@
                             if (validProperty)
                                 element[validProperty] = item.value;
                         } else {
-                            addLog(`未找到元素: ${item.name}`, 'error');
+                            // 不显示未找到元素的错误，因为有些元素可能不存在
+                            // addLog(`未找到元素: ${item.name}`, 'error');
                         }
                     }
                 });
@@ -796,6 +957,17 @@
         // @param command 命令名称
         // @param value 命令值
         function sendCommand(_command, _value) {
+            // 检查系统状态
+            if (systemLocked) {
+                addLog('系统锁定中，无法执行命令', 'warning');
+                return;
+            }
+            
+            if (motorRunning > 0 && motorRunning !== _value) {
+                addLog(`通道 ${motorRunning} 正在运行，请等待完成`, 'warning');
+                return;
+            }
+            
             const doc = {
                 action: {
                     command: _command,
@@ -808,6 +980,12 @@
 
         //发送键值对
         function sendKeyValue(_key, _value) {
+            // 如果系统锁定，阻止某些关键参数的修改
+            if (systemLocked && (_key.startsWith('ext') && (_key.includes('load_time') || _key.includes('uload_time')))) {
+                addLog('系统锁定中，无法修改参数', 'warning');
+                return;
+            }
+            
             const doc = {
                 data: [
                     {
@@ -854,6 +1032,10 @@
             // 初始化状态指示器
             espDot.classList.add('disconnected');
             mqttDot.classList.add('disconnected');
+            
+            // 初始化状态显示
+            updateButtonStates();
+            
             addLog('AMS控制台已加载', 'success');
         });
     </script>

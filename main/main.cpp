@@ -39,6 +39,11 @@ std::atomic<bool> pause_lock{false};// 暂停锁
 std::atomic<int> nozzle_target_temper = -1;
 //std::atomic<int> hw_switch{0};//小绿点, 其实是布尔
 
+// 系统状态变量，用于前端显示和按钮控制
+mesp::wsValue<int> motor_running("motor_running", 0);// 当前运行的电机通道，0表示无电机运行
+mesp::wsValue<string> operation_status("operation_status", "idle");// 操作状态: "idle", "changing", "loading"
+mesp::wsValue<bool> system_locked("system_locked", false);// 系统锁定状态
+
 inline constexpr int 正常 = 0;
 inline constexpr int 退料完成需要退线 = 260;//A1
 //inline constexpr int 退料完成需要退线 = 259;//P1
@@ -94,6 +99,11 @@ inline void motor_run(int motor_id, bool fwd, T&& t) {
         config::LED_R = GPIO_NUM_NC;
         config::LED_L = GPIO_NUM_NC;
     }//使用到了通道7,关闭代码中的LED控制
+    
+    // 更新电机运行状态
+    motor_running = motor_id + 1; // 恢复为1-based索引
+    webfpr(std::string("电机 ") + std::to_string(motor_id + 1) + (fwd ? " 正转" : " 反转"));
+    
     if (fwd) {
         esp::gpio_out(config::motors[motor_id].forward, true);
         mstd::delay(std::forward<T>(t));// 使用传入的延时
@@ -103,6 +113,9 @@ inline void motor_run(int motor_id, bool fwd, T&& t) {
         mstd::delay(std::forward<T>(t));// 使用传入的延时
         esp::gpio_out(config::motors[motor_id].backward, false);
     }
+    
+    // 电机运行完成，清除状态
+    motor_running = 0;
 }//motor_run
 
 
@@ -143,6 +156,9 @@ void change_filament(esp_mqtt_client_handle_t client, int old_extruder, int new_
 
     constexpr auto fpr = [](const string& r) { webfpr(ws, r); };//重设一下fpr
 
+    // 设置系统状态
+    system_locked = true;
+    operation_status = "changing";
     fpr("开始换料");
     // esp::gpio_out(config::LED_R, false);
     if (config::motors[new_extruder - 1].load_time > 0) {//使用固定时间进料@_@
@@ -195,6 +211,11 @@ void change_filament(esp_mqtt_client_handle_t client, int old_extruder, int new_
         fpr("小绿点判定进料");
         fpr("还没写");
     }
+    
+    // 清除系统状态
+    system_locked = false;
+    operation_status = "idle";
+    pause_lock = false;
 }// work
 /*
  * 似乎外挂托盘的数据也能通过mqtt改动
@@ -212,6 +233,9 @@ void load_filament(int new_extruder) {
         return;
     }
 
+    // 设置系统状态
+    system_locked = true;
+    operation_status = "loading";
     webfpr("开始进料");
 
     {//新写的N20上料
@@ -221,10 +245,16 @@ void load_filament(int new_extruder) {
             int old_extruder = extruder;
             if (old_extruder == 0) {
                 webfpr("请设置当前所使用通道,否则无法退料再进料");
+                // 清除系统状态
+                system_locked = false;
+                operation_status = "idle";
                 return;
             }
             if (old_extruder == new_extruder) {
                 webfpr("当前通道已经是" + std::to_string(new_extruder) + "无需上料");
+                // 清除系统状态
+                system_locked = false;
+                operation_status = "idle";
                 return;
             }
             // ws_extruder = std::to_string(old_extruder) + string(" → ") + std::to_string(new_extruder);
@@ -272,6 +302,10 @@ void load_filament(int new_extruder) {
         webfpr("上料完成");
     }//新写的N20上料
 
+    // 清除系统状态
+    system_locked = false;
+    operation_status = "idle";
+    
     return;
 
 }//load_filament

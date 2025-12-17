@@ -37,6 +37,7 @@ std::atomic<int> print_error = 0;//打印错误代码用于判断自动续料 50
 std::atomic<int> ams_status = -1;
 std::atomic<bool> pause_lock{false};// 暂停锁
 std::atomic<int> nozzle_target_temper = -1;
+std::atomic<int> nozzle_current_temper = -1;// 当前喷嘴温度
 //std::atomic<int> hw_switch{0};//小绿点, 其实是布尔
 
 // 系统状态变量，用于前端显示和按钮控制
@@ -82,6 +83,155 @@ inline void webfpr(const string& str) {
     serializeJson(doc, msg);
     ws.textAll(msg);
     last_ws_log = str;
+}
+
+// 日志级别枚举
+enum class LogLevel {
+    DEBUG,
+    INFO,
+    WARNING,
+    ERROR
+};
+
+// 分级日志函数
+inline void log_message(LogLevel level, const string& msg) {
+    string prefix;
+    switch(level) {
+        case LogLevel::DEBUG:   prefix = "[DEBUG] "; break;
+        case LogLevel::INFO:    prefix = "[INFO] "; break;
+        case LogLevel::WARNING: prefix = "⚠️ [WARN] "; break;
+        case LogLevel::ERROR:   prefix = "❌ [ERROR] "; break;
+    }
+    webfpr(prefix + msg);
+}
+
+// @brief 带超时的原子等待
+// @param value 要等待的原子变量
+// @param target 目标值
+// @param timeout 超时时间(毫秒)
+// @return 是否在超时前达到目标值
+template <typename T>
+bool atomic_wait_with_timeout(std::atomic<T>& value, T target, 
+                               std::chrono::milliseconds timeout = std::chrono::milliseconds(30000)) {
+    auto start = std::chrono::steady_clock::now();
+    auto old_value = value.load();
+    
+    while (old_value != target) {
+        auto elapsed = std::chrono::steady_clock::now() - start;
+        if (elapsed > timeout) {
+            log_message(LogLevel::ERROR, "等待状态超时: 目标=" + std::to_string(target) + 
+                       " 当前=" + std::to_string(old_value));
+            return false;
+        }
+        
+        // 使用短暂的延时避免busy-wait
+        mstd::delay(500ms);
+        old_value = value.load();
+    }
+    return true;
+}
+
+// @brief 等待温度达到目标值
+// @param target_temp 目标温度
+// @param tolerance 温度容差
+// @param timeout 超时时间
+// @return 是否成功达到温度
+bool wait_for_temperature(int target_temp, int tolerance = 5, 
+                          std::chrono::seconds timeout = std::chrono::seconds(120)) {
+    auto start = std::chrono::steady_clock::now();
+    
+    log_message(LogLevel::INFO, "等待温度达到 " + std::to_string(target_temp) + "°C");
+    
+    while (true) {
+        int current = nozzle_current_temper.load();
+        int target = nozzle_target_temper.load();
+        
+        // 检查实际温度和目标温度
+        if (current >= target_temp - tolerance && target >= target_temp - tolerance) {
+            log_message(LogLevel::INFO, "温度已达标: 当前=" + std::to_string(current) + 
+                       "°C 目标=" + std::to_string(target) + "°C");
+            return true;
+        }
+        
+        // 超时检查
+        if (std::chrono::steady_clock::now() - start > timeout) {
+            log_message(LogLevel::ERROR, "加热超时: 当前=" + std::to_string(current) + 
+                       "°C 目标=" + std::to_string(target_temp) + "°C");
+            return false;
+        }
+        
+        mstd::delay(1s);
+    }
+}
+
+// @brief 验证料丝已加载(检测小绿点)
+// @param channel 通道编号
+// @param max_retries 最大重试次数
+// @return 是否成功加载
+bool verify_filament_loaded(int channel, int max_retries = 3) {
+    log_message(LogLevel::INFO, "验证通道 " + std::to_string(channel) + " 料丝加载状态");
+    
+    for (int i = 0; i < max_retries; i++) {
+        publish(__client, bambu::msg::get_status);
+        mstd::delay(2s);
+        
+        if (hw_switch == 1) {  // 小绿点触发
+            log_message(LogLevel::INFO, "✓ 通道 " + std::to_string(channel) + " 进料成功");
+            return true;
+        }
+        
+        if (i < max_retries - 1) {
+            log_message(LogLevel::WARNING, "进料未检测到,重试 " + std::to_string(i + 2) + 
+                       "/" + std::to_string(max_retries));
+            motor_run(channel, true, 2s);  // 额外推进
+        }
+    }
+    
+    log_message(LogLevel::ERROR, "通道 " + std::to_string(channel) + " 进料失败,请检查!");
+    return false;
+}
+
+// @brief 验证料丝已卸载(检测小绿点熄灭)
+// @param channel 通道编号
+// @param max_wait_time 最大等待时间(秒)
+// @return 是否成功卸载
+bool verify_filament_unloaded(int channel, int max_wait_time = 10) {
+    log_message(LogLevel::INFO, "验证通道 " + std::to_string(channel) + " 料丝卸载状态");
+    
+    for (int i = 0; i < max_wait_time; i++) {
+        publish(__client, bambu::msg::get_status);
+        mstd::delay(1s);
+        
+        if (hw_switch == 0) {  // 小绿点未触发
+            log_message(LogLevel::INFO, "✓ 通道 " + std::to_string(channel) + " 退料成功");
+            return true;
+        }
+    }
+    
+    log_message(LogLevel::ERROR, "通道 " + std::to_string(channel) + " 退料超时,可能料丝卡住");
+    return false;
+}
+
+// @brief 错误恢复处理
+// @param client MQTT客户端
+// @param error_msg 错误信息
+void handle_error_recovery(esp_mqtt_client_handle_t client, const string& error_msg) {
+    log_message(LogLevel::ERROR, "换料失败: " + error_msg);
+    log_message(LogLevel::INFO, "尝试恢复安全状态...");
+    
+    // 清除错误状态
+    publish(client, bambu::msg::error_clean);
+    mstd::delay(2s);
+    
+    // 关闭加热
+    publish(client, bambu::msg::runGcode("M104 S0\n"));
+    
+    // 更新系统状态
+    system_locked = false;
+    operation_status = "error";
+    pause_lock = false;
+    
+    log_message(LogLevel::WARNING, "请手动检查打印机状态");
 }
 
 // @brief 控制电机运行(前向或后向)
@@ -159,64 +309,85 @@ void change_filament(esp_mqtt_client_handle_t client, int old_extruder, int new_
     // 设置系统状态
     system_locked = true;
     operation_status = "changing";
-    fpr("开始换料");
+    log_message(LogLevel::INFO, "开始换料: 通道" + std::to_string(old_extruder) + 
+               " → 通道" + std::to_string(new_extruder));
+    
     // esp::gpio_out(config::LED_R, false);
-    if (config::motors[new_extruder - 1].load_time > 0) {//使用固定时间进料@_@
-        fpr("使用固定时间进料");
-        // ws_extruder = std::to_string(old_extruder) + string(" → ") + std::to_string(new_extruder);
-        //ws_extruder不再使用,可以考虑给前端加一个状态表示正在换料@_@
+    if (config::motors[new_extruder - 1].load_time > 0) {//使用固定时间进料
+        log_message(LogLevel::INFO, "使用固定时间进料模式");
 
-
-        // publish(client, bambu::msg::uload);
+        // ========== 第一阶段: 退料 ==========
+        log_message(LogLevel::INFO, "阶段1: 加热并退料");
         publish(client, bambu::msg::runGcode(
-                            "M109 S" + std::to_string(config::motors[old_extruder - 1].temper.get_value()) + "\nM620 S255\nT255\nM621 S255\n"));//新的快速退料
-        fpr("发送了退料命令,等待退料完成");
-        mstd::atomic_wait_un(ams_status, 退料完成需要退线);
-        fpr("退料完成,需要退线,等待退线完");
+                            "M109 S" + std::to_string(config::motors[old_extruder - 1].temper.get_value()) + 
+                            "\nM620 S255\nT255\nM621 S255\n"));//新的快速退料
+        
+        // 等待打印机退料完成(带超时)
+        if (!atomic_wait_with_timeout(ams_status, 退料完成需要退线, 60s)) {
+            handle_error_recovery(client, "退料超时");
+            return;
+        }
+        log_message(LogLevel::INFO, "打印机退料完成,开始电机退线");
 
+        // ========== 第二阶段: 电机退线 ==========
         motor_run(old_extruder, false);// 退线
 
-        mstd::atomic_wait_un(ams_status, 退料完成);// 应该需要这个wait,打印机或者网络偶尔会卡
-
-        int new_nozzle_temper = config::motors[new_extruder - 1].temper.get_value();
-        publish(client, bambu::msg::runGcode("M109 S" + std::to_string(new_nozzle_temper)));
-        while (nozzle_target_temper.load() < new_nozzle_temper - 5) {
-            mstd::delay(500ms);// 等待热端温度达到目标温度
+        // 验证料丝是否真的退出(新增)
+        if (!verify_filament_unloaded(old_extruder, 10)) {
+            log_message(LogLevel::WARNING, "检测到残料,尝试额外退料");
+            motor_run(old_extruder, false, 3s);  // 额外退料3秒
+            
+            if (!verify_filament_unloaded(old_extruder, 5)) {
+                handle_error_recovery(client, "残料无法清除,通道" + std::to_string(old_extruder));
+                return;
+            }
         }
-        // mstd::delay(5s);//先5s,时间可能取决于热端到250的速度,一个想法是把拉高热端提前能省点时间,但是比较难控制
-        //@_@也可以读热端温度,不过如果读==250的话,肯定是挤出机先转,或者可以考虑条件为>240之类
 
-        fpr("进线");
-        publish(client, bambu::msg::runGcode("G1 E150 F500"));//旋转热端齿轮辅助进料
-        mstd::delay(3s);//还是需要延迟,命令落实没这么快
+        // 等待打印机确认退料完成(带超时)
+        if (!atomic_wait_with_timeout(ams_status, 退料完成, 30s)) {
+            log_message(LogLevel::WARNING, "退料确认超时,尝试继续");
+        }
+
+        // ========== 第三阶段: 加热新料温度 ==========
+        log_message(LogLevel::INFO, "阶段2: 加热到新料温度");
+        int new_nozzle_temper = config::motors[new_extruder - 1].temper.get_value();
+        publish(client, bambu::msg::runGcode("M109 S" + std::to_string(new_nozzle_temper) + "\n"));
+        
+        // 使用改进的温度等待(带超时和实际温度检测)
+        if (!wait_for_temperature(new_nozzle_temper, 5, 120s)) {
+            handle_error_recovery(client, "加热超时");
+            return;
+        }
+
+        // ========== 第四阶段: 进线 ==========
+        log_message(LogLevel::INFO, "阶段3: 进线");
+        publish(client, bambu::msg::runGcode("G1 E150 F500\n"));//旋转热端齿轮辅助进料
+        mstd::delay(3s);//等待命令执行
         motor_run(new_extruder, true);// 进线
 
+        // 验证料丝是否成功进入(新增)
+        if (!verify_filament_loaded(new_extruder, 3)) {
+            handle_error_recovery(client, "进料失败,通道" + std::to_string(new_extruder));
+            return;
+        }
+
         extruder = new_extruder;//换料完成
+        log_message(LogLevel::INFO, "✓ 换料成功,当前通道: " + std::to_string(new_extruder));
 
-        // {//旧的使用进线程序的进料过程
-        // 	publish(client,bambu::msg::load);
-        // 	fpr("发送了料进线命令,等待进线完成");
-        // 	mstd::atomic_wait_un(ams_status,262);
-        // 	mstd::delay(2s);
-        // 	publish(client,bambu::msg::click_done);
-        // 	mstd::delay(2s);
-        // 	mstd::atomic_wait_un(ams_status,263);
-        // 	publish(client,bambu::msg::click_done);
-        // 	mstd::atomic_wait_un(ams_status,进料完成);
-        // 	mstd::delay(2s);
-        // }
-
+        // ========== 第五阶段: 恢复打印 ==========
         publish(client, bambu::msg::print_resume);// 暂停恢复
+        
     } else {//自动判定进料时间
-        fpr("小绿点判定进料");
-        fpr("还没写");
+        log_message(LogLevel::WARNING, "小绿点自适应进料模式尚未实现");
+        handle_error_recovery(client, "不支持的进料模式");
+        return;
     }
     
     // 清除系统状态
     system_locked = false;
     operation_status = "idle";
     pause_lock = false;
-}// work
+}// change_filament
 /*
  * 似乎外挂托盘的数据也能通过mqtt改动
  */
@@ -226,87 +397,118 @@ esp_mqtt_client_handle_t __client;
 
 //上料
 void load_filament(int new_extruder) {
-    // __client;//先用这个,之后解耦出来,应该穿参进来,改好clien的生存期和错误回报就行
-
+    // 参数验证
     if (!(new_extruder > 0 && new_extruder <= config::motors.size())) {
-        webfpr("不支持的上料通道");
+        log_message(LogLevel::ERROR, "不支持的上料通道: " + std::to_string(new_extruder));
         return;
     }
 
     // 设置系统状态
     system_locked = true;
     operation_status = "loading";
-    webfpr("开始进料");
+    log_message(LogLevel::INFO, "开始上料: 通道" + std::to_string(new_extruder));
 
-    {//新写的N20上料
+    {//上料流程
+        // ========== 第一阶段: 检查当前状态 ==========
+        log_message(LogLevel::INFO, "检查当前料丝状态");
         publish(__client, bambu::msg::get_status);//查询小绿点
         mstd::delay(3s);//等待查询结果
+        
         if (hw_switch == 1) {//有料需要退料
             int old_extruder = extruder;
+            
+            // 验证当前通道设置
             if (old_extruder == 0) {
-                webfpr("请设置当前所使用通道,否则无法退料再进料");
-                // 清除系统状态
+                log_message(LogLevel::ERROR, "请先设置当前使用的通道,否则无法退料");
                 system_locked = false;
                 operation_status = "idle";
                 return;
             }
+            
+            // 检查是否已经是目标通道
             if (old_extruder == new_extruder) {
-                webfpr("当前通道已经是" + std::to_string(new_extruder) + "无需上料");
-                // 清除系统状态
+                log_message(LogLevel::INFO, "当前通道已经是" + std::to_string(new_extruder) + ",无需上料");
                 system_locked = false;
                 operation_status = "idle";
                 return;
             }
-            // ws_extruder = std::to_string(old_extruder) + string(" → ") + std::to_string(new_extruder);
-            // publish(__client, bambu::msg::uload);
+            
+            // ========== 第二阶段: 退旧料 ==========
+            log_message(LogLevel::INFO, "检测到旧料,开始退料: 通道" + std::to_string(old_extruder));
             publish(__client, bambu::msg::runGcode(
-                                  "M109 S" + std::to_string(config::motors[old_extruder - 1].temper.get_value()) + "\nM620 S255\nT255\nM621 S255\n"));//新的快速退料
-            webfpr("发送了退料命令,等待退料完成");
-            mstd::atomic_wait_un(ams_status, 退料完成需要退线);
-            webfpr("退料完成,需要退线,等待退线完");
+                                  "M109 S" + std::to_string(config::motors[old_extruder - 1].temper.get_value()) + 
+                                  "\nM620 S255\nT255\nM621 S255\n"));//快速退料
+            
+            // 等待打印机退料完成(带超时)
+            if (!atomic_wait_with_timeout(ams_status, 退料完成需要退线, 60s)) {
+                handle_error_recovery(__client, "退料超时");
+                return;
+            }
+            log_message(LogLevel::INFO, "打印机退料完成,开始电机退线");
 
             motor_run(old_extruder, false);// 退线
 
-            mstd::atomic_wait_un(ams_status, 退料完成);// 应该需要这个wait,打印机或者网络偶尔会卡
-            webfpr("退线完成");
-        }//if (hw_switch == 1)
-        {//进料
-            int new_nozzle_temper = config::motors[new_extruder - 1].temper.get_value();
-            publish(__client, bambu::msg::runGcode("M109 S" + std::to_string(new_nozzle_temper)));
-            while (nozzle_target_temper.load() < new_nozzle_temper - 5) {
-                mstd::delay(500ms);// 等待热端温度达到目标温度
+            // 验证料丝是否真的退出(新增)
+            if (!verify_filament_unloaded(old_extruder, 10)) {
+                log_message(LogLevel::WARNING, "检测到残料,尝试额外退料");
+                motor_run(old_extruder, false, 3s);
+                
+                if (!verify_filament_unloaded(old_extruder, 5)) {
+                    handle_error_recovery(__client, "残料无法清除");
+                    return;
+                }
             }
-            // mstd::delay(5s);//先5s,时间可能取决于热端到250的速度,一个想法是把拉高热端提前能省点时间,但是比较难控制
-            //@_@也可以读热端温度,不过如果读==250的话,肯定是挤出机先转,或者可以考虑条件为>240之类
 
-            webfpr("进线");
-            publish(__client, bambu::msg::runGcode("G1 E150 F500"));//旋转热端齿轮辅助进料
-            mstd::delay(3s);//还是需要延迟,命令落实没这么快
+            // 等待打印机确认退料完成
+            if (!atomic_wait_with_timeout(ams_status, 退料完成, 30s)) {
+                log_message(LogLevel::WARNING, "退料确认超时,尝试继续");
+            }
+            log_message(LogLevel::INFO, "✓ 退线完成");
+        }//if (hw_switch == 1)
+        
+        // ========== 第三阶段: 加热 ==========
+        {
+            log_message(LogLevel::INFO, "阶段2: 加热到目标温度");
+            int new_nozzle_temper = config::motors[new_extruder - 1].temper.get_value();
+            publish(__client, bambu::msg::runGcode("M109 S" + std::to_string(new_nozzle_temper) + "\n"));
+            
+            // 使用改进的温度等待
+            if (!wait_for_temperature(new_nozzle_temper, 5, 120s)) {
+                handle_error_recovery(__client, "加热超时");
+                return;
+            }
+
+            // ========== 第四阶段: 进线 ==========
+            log_message(LogLevel::INFO, "阶段3: 进线");
+            publish(__client, bambu::msg::runGcode("G1 E150 F500\n"));//旋转热端齿轮辅助进料
+            mstd::delay(3s);//等待命令执行
             motor_run(new_extruder, true);// 进线
 
-            /*
-            此处应该查下小绿点,如果小绿点没触发的话,G1命令无效
-            */
+            // 验证料丝是否成功进入(新增)
+            if (!verify_filament_loaded(new_extruder, 3)) {
+                handle_error_recovery(__client, "进料失败,通道" + std::to_string(new_extruder));
+                return;
+            }
 
-            extruder = new_extruder;//换料完成
-            // ws_extruder = std::to_string(new_extruder);// 更新前端显示的耗材编号
+            extruder = new_extruder;//上料完成
+            log_message(LogLevel::INFO, "✓ 进料成功,当前通道: " + std::to_string(new_extruder));
 
+            // ========== 第五阶段: 冲刷和切屎 ==========
+            log_message(LogLevel::INFO, "阶段4: 冲刷和清理");
             publish(__client,
                     bambu::msg::runGcode(
-                        std::string("G1 E100 F180\n")//简单冲刷100
+                        std::string("G1 E100 F180\n")//简单冲刷100mm
                         + std::string("M400\n") + std::string("M106 P1 S255\n")//风扇全速
-                        + std::string("M400 S3\n")//冷却
-                        + std::string("G1 X -3.5 F18000\nG1 X -13.5 F3000\nG1 X -3.5 F18000\nG1 X -13.5 F3000\nG1 X -3.5 F18000\nG1 X -13.5 F3000\n")//切屎
+                        + std::string("M400 S3\n")//冷却3秒
+                        + std::string("G1 X-3.5 F18000\nG1 X-13.5 F3000\nG1 X-3.5 F18000\nG1 X-13.5 F3000\nG1 X-3.5 F18000\nG1 X-13.5 F3000\n")//切屎
                         + std::string("M400\nM106 P1 S0\nM109 S90\n")));//结束并降温到90
         }
-        webfpr("上料完成");
-    }//新写的N20上料
+        log_message(LogLevel::INFO, "✓ 上料完成");
+    }//上料流程
 
     // 清除系统状态
     system_locked = false;
     operation_status = "idle";
-    
-    return;
 
 }//load_filament
 
@@ -338,6 +540,7 @@ void callback_fun(esp_mqtt_client_handle_t client, const std::string& json) {// 
     // static int nozzle_target_temper = -1;
     bed_target_temper = doc["print"]["bed_target_temper"] | bed_target_temper;
     nozzle_target_temper.store(doc["print"]["nozzle_target_temper"] | nozzle_target_temper.load());
+    nozzle_current_temper.store(doc["print"]["nozzle_temper"] | nozzle_current_temper.load()); // 新增: 跟踪当前温度
     std::string gcode_state = doc["print"]["gcode_state"] | "unkonw";
     hw_switch = doc["print"]["hw_switch_state"] | hw_switch;
     // print_error.store(doc["print"]["print_error"] | print_error.load());
@@ -422,17 +625,27 @@ void Task1(void* param) {
 }//微动缓冲程序
 
 
-//延时检测
+//延时检测和MQTT看门狗
 void Task2(void* param) {
+    int last_timeout_warning = 0;
     while (true) {
         mstd::delay(1000ms);
         mesp::time_out++;
-        if (mesp::time_out > 8) {
-            webfpr("打印机连接超时请检查网络状态");
+        
+        // MQTT超时检测
+        if (mesp::time_out > 8 && mesp::time_out != last_timeout_warning) {
+            log_message(LogLevel::WARNING, "打印机连接超时,请检查网络状态");
+            last_timeout_warning = mesp::time_out;
+        }
+        
+        // 严重超时 - 可能需要重连
+        if (mesp::time_out > 30) {
+            log_message(LogLevel::ERROR, "MQTT连接长时间无响应(30秒+)");
+            // 这里可以添加重连逻辑
             mstd::delay(5000ms);
         }
-    }//延时打印内存信息
-}//其实这个应该放在mqtt那边,作为错误处理的一部分@_@
+    }
+}//延时检测和MQTT看门狗
 
 #include "index.hpp"
 

@@ -180,6 +180,7 @@ void change_filament(esp_mqtt_client_handle_t client, int old_extruder, int new_
     }
     
     // 需要换料的情况：退出旧通道
+    // 如果old_extruder == 0，说明当前无耗材，直接进料新通道
     if (old_extruder > 0 && old_extruder <= config::motors.size()) {
         if (!current_channel_in_use) {
             // 当前通道不在使用中，只需要退出当前通道，不需要退料流程
@@ -200,6 +201,8 @@ void change_filament(esp_mqtt_client_handle_t client, int old_extruder, int new_
                 mstd::atomic_wait_un(ams_status, 退料完成);// 应该需要这个wait,打印机或者网络偶尔会卡
             }
         }
+    } else if (old_extruder == 0) {
+        webfpr("当前无耗材，直接进料新通道");
     }
     
     // 进料新通道
@@ -221,8 +224,6 @@ void change_filament(esp_mqtt_client_handle_t client, int old_extruder, int new_
         mstd::delay(3s);//还是需要延迟,命令落实没这么快
         motor_run(new_extruder, true);// 进线
 
-        extruder = new_extruder;//换料完成
-
         // {//旧的使用进线程序的进料过程
         // 	publish(client,bambu::msg::load);
         // 	fpr("发送了料进线命令,等待进线完成");
@@ -236,10 +237,19 @@ void change_filament(esp_mqtt_client_handle_t client, int old_extruder, int new_
         // 	mstd::delay(2s);
         // }
 
+        // 换料完成后再更新extruder，避免在换料过程中被callback_fun读取到新值
+        extruder = new_extruder;//换料完成
+        webfpr("换料完成: 通道" + std::to_string(new_extruder));
+
         publish(client, bambu::msg::print_resume);// 暂停恢复
     } else {//自动判定进料时间
-        fpr("小绿点判定进料");
-        fpr("还没写");
+        webfpr("小绿点判定进料");
+        webfpr("功能未实现，无法完成换料");
+        // 即使功能未实现，也要清除状态，避免系统被锁定
+        system_locked = false;
+        operation_status = "idle";
+        pause_lock = false;
+        return;
     }
     
     // 清除系统状态
@@ -257,6 +267,18 @@ esp_mqtt_client_handle_t __client;
 //上料
 void load_filament(int new_extruder) {
     // __client;//先用这个,之后解耦出来,应该穿参进来,改好clien的生存期和错误回报就行
+
+    // 检查系统是否被锁定（换料或上料进行中）
+    if (system_locked.load() || pause_lock.load()) {
+        webfpr("系统正在执行其他操作，请稍后再试");
+        return;
+    }
+
+    // 检查__client是否有效
+    if (__client == nullptr) {
+        webfpr("MQTT客户端未初始化，无法执行上料");
+        return;
+    }
 
     if (!(new_extruder > 0 && new_extruder <= config::motors.size())) {
         webfpr("不支持的上料通道");
@@ -384,8 +406,30 @@ void callback_fun(esp_mqtt_client_handle_t client, const std::string& json) {// 
     //@_@这边也有些混乱,实质都是因为打印机网络这边不是很稳定所遗留的写法,需要更好的处理
     if (bed_target_temper > 0 && bed_target_temper < 17) {// 读到的温度是通道
         if (gcode_state == "PAUSE") {
+            // 如果正在换料中，忽略新的换料请求，避免重复触发
+            if (pause_lock.load() || system_locked.load()) {
+                fpr("换料进行中，忽略新的换料请求");
+                return;
+            }
+            
             // mstd::delay(4s);//确保暂停动作(3.5s)完成
             // mstd::delay(4500ms);// 貌似4s还是有可能会有bug,貌似bug本质是以前发gcode忘了\n,现在应该不用延时
+            
+            // 保存通道号，避免在恢复热床温度时丢失
+            int new_extruder = bed_target_temper;
+            
+            // 验证新通道的有效性
+            if (new_extruder < 1 || new_extruder > config::motors.size()) {
+                fpr("无效的通道编号: " + std::to_string(new_extruder));
+                if (bed_target_temper_max > 0) {
+                    publish(client, bambu::msg::runGcode(std::string("M190 S") + std::to_string(bed_target_temper_max)));//恢复原来的热床温度
+                }
+                mstd::delay(1000ms);
+                publish(client, bambu::msg::print_resume);
+                return;
+            }
+            
+            // 先恢复热床温度（如果bed_target_temper_max > 0）
             if (bed_target_temper_max > 0) {// 似乎热床置零会导致热端固定到90
                 publish(client, bambu::msg::runGcode(
                                     std::string("M190 S") + std::to_string(bed_target_temper_max)// 恢复原来的热床温度
@@ -394,33 +438,29 @@ void callback_fun(esp_mqtt_client_handle_t client, const std::string& json) {// 
             }
 
             int old_extruder = extruder;
-            int new_extruder = bed_target_temper;
-            
-            // 验证新通道的有效性
-            if (new_extruder < 1 || new_extruder > config::motors.size()) {
-                fpr("无效的通道编号: " + std::to_string(new_extruder));
-                publish(client, bambu::msg::runGcode(std::string("M190 S") + std::to_string(bed_target_temper_max)));//恢复原来的热床温度
-                mstd::delay(1000ms);
-                publish(client, bambu::msg::print_resume);
-                if (bed_target_temper_max > 0)
-                    bed_target_temper = bed_target_temper_max;
-                return;
-            }
             
             if (old_extruder != new_extruder) {//旧通道不等于新通道
                 fpr("唤醒换料程序: 通道" + std::to_string(old_extruder) + " → 通道" + std::to_string(new_extruder));
                 pause_lock = true;
+                // 使用捕获值而不是引用，避免bed_target_temper被修改影响
                 async_channel.emplace([=]() {
                     change_filament(client, old_extruder, new_extruder);
                 });
-            } else if (!pause_lock.load()) {// 可能会收到旧消息
-                fpr("同一耗材,无需换料");
-                publish(client, bambu::msg::runGcode(std::string("M190 S") + std::to_string(bed_target_temper_max)));//恢复原来的热床温度
-                mstd::delay(1000ms);//确保暂停动作完成
-                publish(client, bambu::msg::print_resume);// 无须换料
+            } else {// 同一通道，无需换料
+                if (!pause_lock.load()) {// 可能会收到旧消息
+                    fpr("同一耗材,无需换料");
+                    if (bed_target_temper_max > 0) {
+                        publish(client, bambu::msg::runGcode(std::string("M190 S") + std::to_string(bed_target_temper_max)));//恢复原来的热床温度
+                    }
+                    mstd::delay(1000ms);//确保暂停动作完成
+                    publish(client, bambu::msg::print_resume);// 无须换料
+                } else {
+                    // pause_lock已设置，说明换料正在进行中，忽略此消息
+                    fpr("换料进行中，忽略重复消息");
+                }
             }
-            if (bed_target_temper_max > 0)
-                bed_target_temper = bed_target_temper_max;// 必要,恢复温度后,MQTT的更新可能不及时
+            // 注意：不要在换料过程中恢复bed_target_temper，避免影响换料流程
+            // 换料完成后，bed_target_temper会自然恢复为bed_target_temper_max
 
         } else {
             // publish(client,bambu::msg::get_status);//从第二次暂停开始,PAUSE就不会出现在常态消息里,不知道怎么回事

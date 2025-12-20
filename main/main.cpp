@@ -160,23 +160,53 @@ void change_filament(esp_mqtt_client_handle_t client, int old_extruder, int new_
     system_locked = true;
     operation_status = "changing";
     fpr("开始换料");
-    // esp::gpio_out(config::LED_R, false);
+    
+    // 查询当前通道使用状态
+    publish(client, bambu::msg::get_status);
+    mstd::delay(3s);//等待查询结果
+    
+    // 检查当前通道是否在使用中（通过hw_switch判断）
+    bool current_channel_in_use = (hw_switch == 1);
+    
+    // 如果当前记录的通道就是目标通道，且正在使用中，直接继续，无需换料
+    if (old_extruder == new_extruder && current_channel_in_use) {
+        fpr("当前通道" + std::to_string(new_extruder) + "正在使用中，无需换料");
+        extruder = new_extruder;// 确保记录正确
+        system_locked = false;
+        operation_status = "idle";
+        pause_lock = false;
+        publish(client, bambu::msg::print_resume);// 暂停恢复
+        return;
+    }
+    
+    // 需要换料的情况：退出旧通道
+    if (old_extruder > 0 && old_extruder <= config::motors.size()) {
+        if (!current_channel_in_use) {
+            // 当前通道不在使用中，只需要退出当前通道，不需要退料流程
+            fpr("当前通道" + std::to_string(old_extruder) + "未在使用中，直接退出");
+            motor_run(old_extruder, false);// 退线
+        } else {
+            // 当前通道在使用中，需要完整的退料流程
+            fpr("当前通道" + std::to_string(old_extruder) + "正在使用中，执行退料");
+            if (config::motors[old_extruder - 1].load_time > 0) {
+                publish(client, bambu::msg::runGcode(
+                                    "M109 S" + std::to_string(config::motors[old_extruder - 1].temper.get_value()) + "\nM620 S255\nT255\nM621 S255\n"));//新的快速退料
+                fpr("发送了退料命令,等待退料完成");
+                mstd::atomic_wait_un(ams_status, 退料完成需要退线);
+                fpr("退料完成,需要退线,等待退线完");
+
+                motor_run(old_extruder, false);// 退线
+
+                mstd::atomic_wait_un(ams_status, 退料完成);// 应该需要这个wait,打印机或者网络偶尔会卡
+            }
+        }
+    }
+    
+    // 进料新通道
     if (config::motors[new_extruder - 1].load_time > 0) {//使用固定时间进料@_@
-        fpr("使用固定时间进料");
+        fpr("使用固定时间进料到通道" + std::to_string(new_extruder));
         // ws_extruder = std::to_string(old_extruder) + string(" → ") + std::to_string(new_extruder);
         //ws_extruder不再使用,可以考虑给前端加一个状态表示正在换料@_@
-
-
-        // publish(client, bambu::msg::uload);
-        publish(client, bambu::msg::runGcode(
-                            "M109 S" + std::to_string(config::motors[old_extruder - 1].temper.get_value()) + "\nM620 S255\nT255\nM621 S255\n"));//新的快速退料
-        fpr("发送了退料命令,等待退料完成");
-        mstd::atomic_wait_un(ams_status, 退料完成需要退线);
-        fpr("退料完成,需要退线,等待退线完");
-
-        motor_run(old_extruder, false);// 退线
-
-        mstd::atomic_wait_un(ams_status, 退料完成);// 应该需要这个wait,打印机或者网络偶尔会卡
 
         int new_nozzle_temper = config::motors[new_extruder - 1].temper.get_value();
         publish(client, bambu::msg::runGcode("M109 S" + std::to_string(new_nozzle_temper)));
@@ -365,8 +395,20 @@ void callback_fun(esp_mqtt_client_handle_t client, const std::string& json) {// 
 
             int old_extruder = extruder;
             int new_extruder = bed_target_temper;
+            
+            // 验证新通道的有效性
+            if (new_extruder < 1 || new_extruder > config::motors.size()) {
+                fpr("无效的通道编号: " + std::to_string(new_extruder));
+                publish(client, bambu::msg::runGcode(std::string("M190 S") + std::to_string(bed_target_temper_max)));//恢复原来的热床温度
+                mstd::delay(1000ms);
+                publish(client, bambu::msg::print_resume);
+                if (bed_target_temper_max > 0)
+                    bed_target_temper = bed_target_temper_max;
+                return;
+            }
+            
             if (old_extruder != new_extruder) {//旧通道不等于新通道
-                fpr("唤醒换料程序");
+                fpr("唤醒换料程序: 通道" + std::to_string(old_extruder) + " → 通道" + std::to_string(new_extruder));
                 pause_lock = true;
                 async_channel.emplace([=]() {
                     change_filament(client, old_extruder, new_extruder);

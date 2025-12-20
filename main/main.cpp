@@ -159,7 +159,7 @@ void change_filament(esp_mqtt_client_handle_t client, int old_extruder, int new_
     // 设置系统状态
     system_locked = true;
     operation_status = "changing";
-    fpr("开始换料");
+    webfpr("开始换料");
     
     // 查询当前通道使用状态
     publish(client, bambu::msg::get_status);
@@ -170,7 +170,7 @@ void change_filament(esp_mqtt_client_handle_t client, int old_extruder, int new_
     
     // 如果当前记录的通道就是目标通道，且正在使用中，直接继续，无需换料
     if (old_extruder == new_extruder && current_channel_in_use) {
-        fpr("当前通道" + std::to_string(new_extruder) + "正在使用中，无需换料");
+        webfpr("当前通道" + std::to_string(new_extruder) + "正在使用中，无需换料");
         extruder = new_extruder;// 确保记录正确
         system_locked = false;
         operation_status = "idle";
@@ -183,17 +183,17 @@ void change_filament(esp_mqtt_client_handle_t client, int old_extruder, int new_
     if (old_extruder > 0 && old_extruder <= config::motors.size()) {
         if (!current_channel_in_use) {
             // 当前通道不在使用中，只需要退出当前通道，不需要退料流程
-            fpr("当前通道" + std::to_string(old_extruder) + "未在使用中，直接退出");
+            webfpr("当前通道" + std::to_string(old_extruder) + "未在使用中，直接退出");
             motor_run(old_extruder, false);// 退线
         } else {
             // 当前通道在使用中，需要完整的退料流程
-            fpr("当前通道" + std::to_string(old_extruder) + "正在使用中，执行退料");
+            webfpr("当前通道" + std::to_string(old_extruder) + "正在使用中，执行退料");
             if (config::motors[old_extruder - 1].load_time > 0) {
                 publish(client, bambu::msg::runGcode(
                                     "M109 S" + std::to_string(config::motors[old_extruder - 1].temper.get_value()) + "\nM620 S255\nT255\nM621 S255\n"));//新的快速退料
-                fpr("发送了退料命令,等待退料完成");
+                webfpr("发送了退料命令,等待退料完成");
                 mstd::atomic_wait_un(ams_status, 退料完成需要退线);
-                fpr("退料完成,需要退线,等待退线完");
+                webfpr("退料完成,需要退线,等待退线完");
 
                 motor_run(old_extruder, false);// 退线
 
@@ -204,7 +204,7 @@ void change_filament(esp_mqtt_client_handle_t client, int old_extruder, int new_
     
     // 进料新通道
     if (config::motors[new_extruder - 1].load_time > 0) {//使用固定时间进料@_@
-        fpr("使用固定时间进料到通道" + std::to_string(new_extruder));
+        webfpr("使用固定时间进料到通道" + std::to_string(new_extruder));
         // ws_extruder = std::to_string(old_extruder) + string(" → ") + std::to_string(new_extruder);
         //ws_extruder不再使用,可以考虑给前端加一个状态表示正在换料@_@
 
@@ -216,7 +216,7 @@ void change_filament(esp_mqtt_client_handle_t client, int old_extruder, int new_
         // mstd::delay(5s);//先5s,时间可能取决于热端到250的速度,一个想法是把拉高热端提前能省点时间,但是比较难控制
         //@_@也可以读热端温度,不过如果读==250的话,肯定是挤出机先转,或者可以考虑条件为>240之类
 
-        fpr("进线");
+        webfpr("进线");
         publish(client, bambu::msg::runGcode("G1 E150 F500"));//旋转热端齿轮辅助进料
         mstd::delay(3s);//还是需要延迟,命令落实没这么快
         motor_run(new_extruder, true);// 进线

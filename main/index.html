@@ -618,6 +618,10 @@
                     <span class="status-value" id="system-locked">未锁定</span>
                 </div>
                 <div class="status-item">
+                    <label>当前通道:</label>
+                    <span class="status-value" id="current-extruder">通道 1</span>
+                </div>
+                <div class="status-item">
                     <label>电机运行:</label>
                     <span class="status-value" id="motor-running">无</span>
                 </div>
@@ -897,6 +901,24 @@
                             statusEl.className = 'status-value ' + operationStatus;
                         }
                         updateButtonStates();
+                    } else if (item.name == 'extruder') {
+                        // 更新当前使用中通道显示
+                        const extruderEl = document.getElementById('current-extruder');
+                        if (extruderEl) {
+                            const channelNum = item.value || 0;
+                            if (channelNum > 0) {
+                                extruderEl.textContent = `通道 ${channelNum}`;
+                                extruderEl.className = 'status-value idle';
+                            } else {
+                                extruderEl.textContent = '无耗材';
+                                extruderEl.className = 'status-value';
+                            }
+                        }
+                        // 同时更新通道选择下拉框的值
+                        const extruderSelect = document.getElementById('extruder');
+                        if (extruderSelect) {
+                            extruderSelect.value = item.value || 0;
+                        }
                     } else {
                         const element = document.getElementById(item.name);
                         const propertyPriority = ['value', 'textContent', 'innerHTML'];
@@ -1027,6 +1049,15 @@
                 option.value = i;
                 option.textContent = `通道 ${i}`;
                 extruderSelect.appendChild(option);
+            }
+            // 默认选择通道1
+            extruderSelect.value = 1;
+            
+            // 初始化当前通道显示（默认通道1）
+            const currentExtruderEl = document.getElementById('current-extruder');
+            if (currentExtruderEl) {
+                currentExtruderEl.textContent = '通道 1';
+                currentExtruderEl.className = 'status-value idle';
             }
             
             // 初始化状态指示器

@@ -30,7 +30,7 @@ TaskHandle_t Task2_handle;//延时调试信息
 //分割
 
 int bed_target_temper_max = 0;
-mesp::wsStoreValue<int> extruder("extruder", 0);// 1-16, 0表示无耗材
+mesp::wsStoreValue<int> extruder("extruder", 1);// 1-16, 0表示无耗材，默认通道1有料
 
 int sequence_id = -1;
 std::atomic<int> print_error = 0;//打印错误代码用于判断自动续料 50364437是A1 50364420是P1

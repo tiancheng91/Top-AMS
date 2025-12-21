@@ -6,25 +6,11 @@
 ;G392 S0
 ;M1007 S0
 
-; ===== 优化：只在需要换料时才执行M140命令，避免无效换料 =====
-; 问题：原代码会无条件执行M140，导致即使当前已经是目标通道也会触发换料，循环遍历所有通道(1-4)
-; 解决：添加条件判断，只有当真正需要换料时才执行M140
-; 
-; 根据Bambu Lab官方文档：https://wiki.bambulab.com/en/p1/manual/extension-board-gcode-placeholder-reference
-; - previous_extruder (int 0-16): 之前使用的挤出机（当前正在使用的通道）
-; - next_extruder (int 0-16): 下一个要使用的挤出机（目标通道）
-; - filament_extruder_id: 当前用料的ID
-; - 如果 previous_extruder == next_extruder，说明不需要换料，跳过M140命令
-;
-; 方案1（推荐）：使用previous_extruder进行精确判断
-{if next_extruder != previous_extruder && next_extruder < 255}
+; 实现：如果前后通道一致，直接返回，跳过所有换料操作；如果不一致，继续执行
+{if next_extruder == previous_extruder || next_extruder >= 255}
+; 前后通道一致或无效通道，直接返回，跳过所有换料操作
+{else}
 M140 S{next_extruder + 1};EXT
-{endif}
-;
-; 方案2（备用）：如果previous_extruder不可用，使用toolchange_count判断
-; {if toolchange_count > 0 && next_extruder < 255}
-; M140 S{next_extruder + 1};EXT
-; {endif}
 
 ;M204 S9000
 ;{if toolchange_count > 1}
@@ -206,4 +192,5 @@ M621 S[next_extruder]A
 
 G392 S0
 M1007 S1
+{endif}
 

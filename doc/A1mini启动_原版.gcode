@@ -436,21 +436,24 @@ M1002 gcode_claim_action : 0
 M400 ; wait all motion done before implement the emprical L parameters
 
 ;===== for Textured PEI Plate , lower the nozzle as the nozzle was touching topmost of the texture when homing ==
-    ;curr_bed_type={curr_bed_type}
-    {if curr_bed_type=="Textured PEI Plate"}
-    G29.1 Z{-0.02} ; for Textured PEI Plate
-    {endif}
-    
-    M960 S1 P0 ; turn off laser
-    M960 S2 P0 ; turn off laser
-    M106 S0 ; turn off fan
-    M106 P2 S0 ; turn off big fan
-    M106 P3 S0 ; turn off chamber fan
-    
-    M975 S1 ; turn on mech mode supression
-    G90
-    M83
-    T1000
-    
-    M211 X0 Y0 Z0 ;turn off soft endstop
-    M1007 S1
+;curr_bed_type={curr_bed_type}
+{if curr_bed_type=="Textured PEI Plate"}
+G29.1 Z{-0.02} ; for Textured PEI Plate
+{endif}
+
+M960 S1 P0 ; turn off laser
+M960 S2 P0 ; turn off laser
+M106 S0 ; turn off fan
+M106 P2 S0 ; turn off big fan
+M106 P3 S0 ; turn off chamber fan
+
+M975 S1 ; turn on mech mode supression
+G90
+M83
+T1000
+
+M211 X0 Y0 Z0 ;turn off soft endstop
+M1007 S1
+
+
+

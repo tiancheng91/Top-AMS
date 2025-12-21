@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
+#include <chrono>
 
 #include "esptools.hpp"
 
@@ -30,7 +31,7 @@ TaskHandle_t Task2_handle;//延时调试信息
 //分割
 
 int bed_target_temper_max = 0;
-mesp::wsStoreValue<int> extruder("extruder", 1);// 1-16, 0表示无耗材，默认通道1有料
+mesp::wsStoreValue<int> extruder("extruder", 0);// 1-16, 0表示无耗材，默认未设置
 
 int sequence_id = -1;
 std::atomic<int> print_error = 0;//打印错误代码用于判断自动续料 50364437是A1 50364420是P1
@@ -60,6 +61,27 @@ AsyncWebSocket& ws = mesp::ws_server;//先直接用全局的ws_server
 inline mstd::channel_lock<std::function<void()>> async_channel;//异步任务通道
 
 inline string last_ws_log = "日志初始化";//可能会有多个webfpr,非线程安全注意,现在单核先不管
+
+// RAII状态管理类，确保在异常或提前返回时也能清理状态
+struct SystemStateGuard {
+    bool active;
+    SystemStateGuard() : active(true) {
+        system_locked = true;
+    }
+    ~SystemStateGuard() {
+        if (active) {
+            system_locked = false;
+            operation_status = "idle";
+            pause_lock = false;
+        }
+    }
+    void release() {
+        active = false;
+        system_locked = false;
+        operation_status = "idle";
+        pause_lock = false;
+    }
+};
 
 
 //@brief WebSocket消息打印
@@ -153,9 +175,8 @@ void publish(esp_mqtt_client_handle_t client, const std::string& msg) {
 
 //换料
 void change_filament(esp_mqtt_client_handle_t client, int old_extruder, int new_extruder) {
-
-    // 设置系统状态
-    system_locked = true;
+    // 使用RAII确保状态总是被清理
+    SystemStateGuard state_guard;
     operation_status = "changing";
     webfpr("开始换料");
     
@@ -170,9 +191,7 @@ void change_filament(esp_mqtt_client_handle_t client, int old_extruder, int new_
     if (old_extruder == new_extruder && has_filament) {
         webfpr("当前通道" + std::to_string(new_extruder) + "正在使用中，无需换料");
         extruder = new_extruder;// 确保记录正确
-        system_locked = false;
-        operation_status = "idle";
-        pause_lock = false;
+        state_guard.release(); // 提前释放状态
         publish(client, bambu::msg::print_resume);// 暂停恢复
         return;
     }
@@ -191,12 +210,18 @@ void change_filament(esp_mqtt_client_handle_t client, int old_extruder, int new_
                 publish(client, bambu::msg::runGcode(
                                     "M109 S" + std::to_string(config::motors[old_extruder - 1].temper.get_value()) + "\nM620 S255\nT255\nM621 S255\n"));//新的快速退料
                 webfpr("发送了退料命令,等待退料完成");
-                mstd::atomic_wait_un(ams_status, 退料完成需要退线);
+                if (!mstd::atomic_wait_un_timeout(ams_status, 退料完成需要退线, 120s)) {
+                    webfpr("等待退料完成超时，可能打印机未响应");
+                    return; // RAII会自动清理状态
+                }
                 webfpr("退料完成,需要退线,等待退线完");
 
                 motor_run(old_extruder, false);// 退线
 
-                mstd::atomic_wait_un(ams_status, 退料完成);// 应该需要这个wait,打印机或者网络偶尔会卡
+                if (!mstd::atomic_wait_un_timeout(ams_status, 退料完成, 30s)) {
+                    webfpr("等待退料完成状态超时，继续执行");
+                    // 继续执行，不返回，因为退线已完成
+                }
             }
         }
     } else if (old_extruder == 0) {
@@ -211,7 +236,12 @@ void change_filament(esp_mqtt_client_handle_t client, int old_extruder, int new_
 
         int new_nozzle_temper = config::motors[new_extruder - 1].temper.get_value();
         publish(client, bambu::msg::runGcode("M109 S" + std::to_string(new_nozzle_temper)));
+        auto temp_deadline = std::chrono::steady_clock::now() + 300s; // 5分钟超时
         while (nozzle_target_temper.load() < new_nozzle_temper - 5) {
+            if (std::chrono::steady_clock::now() > temp_deadline) {
+                webfpr("等待热端温度超时，可能打印机未响应");
+                return; // RAII会自动清理状态
+            }
             mstd::delay(500ms);// 等待热端温度达到目标温度
         }
         // mstd::delay(5s);//先5s,时间可能取决于热端到250的速度,一个想法是把拉高热端提前能省点时间,但是比较难控制
@@ -243,18 +273,13 @@ void change_filament(esp_mqtt_client_handle_t client, int old_extruder, int new_
     } else {//自动判定进料时间
         webfpr("小绿点判定进料");
         webfpr("功能未实现，无法完成换料");
-        // 即使功能未实现，也要清除状态，避免系统被锁定
-        system_locked = false;
-        operation_status = "idle";
-        pause_lock = false;
+        state_guard.release(); // 提前释放状态
         return;
     }
     
-    // 清除系统状态
-    system_locked = false;
-    operation_status = "idle";
-    pause_lock = false;
-}// work
+    // 正常完成，释放状态
+    state_guard.release();
+}// change_filament
 /*
  * 似乎外挂托盘的数据也能通过mqtt改动
  */
@@ -283,8 +308,8 @@ void load_filament(int new_extruder) {
         return;
     }
 
-    // 设置系统状态
-    system_locked = true;
+    // 使用RAII确保状态总是被清理
+    SystemStateGuard state_guard;
     operation_status = "loading";
     webfpr("开始进料");
 
@@ -299,17 +324,13 @@ void load_filament(int new_extruder) {
             int old_extruder = extruder.get_value();
             if (old_extruder == 0) {
                 webfpr("检测到有料但未设置当前通道，请先设置当前通道");
-                // 清除系统状态
-                system_locked = false;
-                operation_status = "idle";
+                state_guard.release(); // 提前释放状态
                 return;
             }
             if (old_extruder == new_extruder) {
                 // 通道一样，跳过进料
                 webfpr("当前通道已经是" + std::to_string(new_extruder) + "，且检测到有料，跳过进料");
-                // 清除系统状态
-                system_locked = false;
-                operation_status = "idle";
+                state_guard.release(); // 提前释放状态
                 return;
             }
             // 通道变更，需要先退料
@@ -317,12 +338,18 @@ void load_filament(int new_extruder) {
             publish(__client, bambu::msg::runGcode(
                                   "M109 S" + std::to_string(config::motors[old_extruder - 1].temper.get_value()) + "\nM620 S255\nT255\nM621 S255\n"));//新的快速退料
             webfpr("发送了退料命令,等待退料完成");
-            mstd::atomic_wait_un(ams_status, 退料完成需要退线);
+            if (!mstd::atomic_wait_un_timeout(ams_status, 退料完成需要退线, 120s)) {
+                webfpr("等待退料完成超时，可能打印机未响应");
+                return; // RAII会自动清理状态
+            }
             webfpr("退料完成,需要退线,等待退线完");
 
             motor_run(old_extruder, false);// 退线
 
-            mstd::atomic_wait_un(ams_status, 退料完成);// 应该需要这个wait,打印机或者网络偶尔会卡
+            if (!mstd::atomic_wait_un_timeout(ams_status, 退料完成, 30s)) {
+                webfpr("等待退料完成状态超时，继续执行");
+                // 继续执行，不返回，因为退线已完成
+            }
             webfpr("退线完成");
         } else {
             // 无料，直接进料
@@ -331,7 +358,12 @@ void load_filament(int new_extruder) {
         {//进料
             int new_nozzle_temper = config::motors[new_extruder - 1].temper.get_value();
             publish(__client, bambu::msg::runGcode("M109 S" + std::to_string(new_nozzle_temper)));
+            auto temp_deadline = std::chrono::steady_clock::now() + 300s; // 5分钟超时
             while (nozzle_target_temper.load() < new_nozzle_temper - 5) {
+                if (std::chrono::steady_clock::now() > temp_deadline) {
+                    webfpr("等待热端温度超时，可能打印机未响应");
+                    return; // RAII会自动清理状态
+                }
                 mstd::delay(500ms);// 等待热端温度达到目标温度
             }
             // mstd::delay(5s);//先5s,时间可能取决于热端到250的速度,一个想法是把拉高热端提前能省点时间,但是比较难控制
@@ -360,9 +392,8 @@ void load_filament(int new_extruder) {
         webfpr("上料完成");
     }//新写的N20上料
 
-    // 清除系统状态
-    system_locked = false;
-    operation_status = "idle";
+    // 正常完成，释放状态
+    state_guard.release();
     
     return;
 

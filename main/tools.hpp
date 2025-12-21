@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include <chrono>
 #include <thread>
+#include <atomic>
 // #define NO_DEBUG
 
 #ifndef NO_DEBUG
@@ -61,6 +62,28 @@ namespace mstd {
             value.wait(old_value);
             old_value = value;
         }
+    }
+
+    // 带超时的atomic_wait_un，防止永久等待导致死锁
+    template <typename T, typename Rep, typename Period>
+    bool atomic_wait_un_timeout(std::atomic<T>& value, T target, const std::chrono::duration<Rep, Period>& timeout) {
+        auto deadline = std::chrono::steady_clock::now() + timeout;
+        auto old_value = value.load();
+        while (old_value != target) {
+            auto remaining = deadline - std::chrono::steady_clock::now();
+            if (remaining <= std::chrono::duration<Rep, Period>::zero()) {
+                return false; // 超时
+            }
+            // 使用wait_for等待，返回值表示是否在超时前被唤醒
+            // 即使被唤醒，也需要重新检查值是否等于目标值
+            value.wait_for(old_value, remaining);
+            old_value = value.load();
+            // 如果已经超时，退出循环
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return false; // 超时
+            }
+        }
+        return true; // 成功等待到目标值
     }
 
 }// mstd

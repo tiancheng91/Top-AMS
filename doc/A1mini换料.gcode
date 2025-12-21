@@ -13,6 +13,7 @@
 ; 根据Bambu Lab官方文档：https://wiki.bambulab.com/en/p1/manual/extension-board-gcode-placeholder-reference
 ; - previous_extruder (int 0-16): 之前使用的挤出机（当前正在使用的通道）
 ; - next_extruder (int 0-16): 下一个要使用的挤出机（目标通道）
+; - filament_extruder_id: 当前用料的ID
 ; - 如果 previous_extruder == next_extruder，说明不需要换料，跳过M140命令
 ;
 ; 方案1（推荐）：使用previous_extruder进行精确判断

@@ -10,34 +10,38 @@
 ; 设置打印板温度为 next_extruder + 1，用于通知外部设备换料
 M140 S{next_extruder + 1};EXT
 
-G392 S0
-M1007 S0
-M204 S9000
-{if toolchange_count > 1}
-{if z_hop_types[current_extruder] == 0 || z_hop_types[current_extruder] == 3}
-G17
-G2 Z{z_after_toolchange + 0.4} I0.86 J0.86 P1 F10000 ; spiral lift a little from second lift
-{endif}
-{endif}
-G1 Z{max_layer_z + 3.0} F1200
+; 已注释：退料前的准备动作由 main.cpp 中的退料流程处理
+; G392 S0
+; M1007 S0
+; M204 S9000
+; {if toolchange_count > 1}
+; {if z_hop_types[current_extruder] == 0 || z_hop_types[current_extruder] == 3}
+; G17
+; G2 Z{z_after_toolchange + 0.4} I0.86 J0.86 P1 F10000 ; spiral lift a little from second lift
+; {endif}
+; {endif}
+; G1 Z{max_layer_z + 3.0} F1200
 
 M400
 M106 P1 S0
 M106 P2 S0
-{if old_filament_temp > 142 && next_extruder < 255}
-M104 S[old_filament_temp]
-{endif}
+; 已注释：旧耗材温度设置由 main.cpp 中的退料流程处理
+; {if old_filament_temp > 142 && next_extruder < 255}
+; M104 S[old_filament_temp]
+; {endif}
 
-G1 X180 F18000
-
-;===== 手动换料部分 =====
-; 移动到换料位置
-G1 Y90 F9000
+; 已注释：移动到换料位置的操作由 main.cpp 中的退料流程处理
+; G1 X180 F18000
+;
+; ;===== 手动换料部分 =====
+; ; 移动到换料位置
+; G1 Y90 F9000
 
 {if next_extruder < 255}
 
-M400
-G92 E0
+; 已注释：M400和G92 E0重置由 main.cpp 中的退料流程处理
+; M400
+; G92 E0
 
 ;===== 手动换料暂停点 =====
 ; 移动到切割位置
@@ -45,14 +49,16 @@ G1 X-13.5 F18000
 M400
 
 ; 切割线材（推出一小段然后回退）
-G1 E10 F200
-G1 E-10 F200
-G1 E-20 F500
+; 已注释：退料逻辑由 main.cpp 中的快速退料命令处理（M620 S255\nT255\nM621 S255）
+; G1 E10 F200
+; G1 E-10 F200
+; G1 E-20 F500
 
 ; 暂停等待用户手动换料
 M400 U1
 
 ;===== 继续执行冲刷逻辑 =====
+{if next_extruder < 255}
 M400
 G92 E0
 

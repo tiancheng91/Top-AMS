@@ -757,6 +757,7 @@
         // 通道配置：由 Python 脚本传入
         const CHANNEL_COUNT = CHANNEL_COUNT_PLACEHOLDER;
         
+        // 颜色&名称 疑似都没用到，都是后端返回的
         // 预设颜色数组
         const COLOR_PRESETS = ["#3498db", "#e74c3c", "#2ecc71", "#f1c40f", "#9b59b6", "#1abc9c", "#e67e22", "#34495e"];
         
@@ -817,8 +818,7 @@
         });
         // 上面都是生成通道管理的
 
-
-        const ws = new WebSocket('ws://' + window.location.hostname + '/ws');
+        const ws = new WebSocket((window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + window.location.hostname + '/ws');
         const espDot = document.getElementById('esp-dot');
         const mqttDot = document.getElementById('mqtt-dot');
         let currentChannels = [];

@@ -17,6 +17,23 @@ jobs:
         id: tag
         run: echo "name=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
       
+      - name: Prepare release notes
+        id: release_notes
+        run: |
+          TAG_NAME="${{ steps.tag.outputs.name }}"
+          VERSION="${TAG_NAME#v}"  # 移除 'v' 前缀
+          DATE=$(date +'%Y-%m-%d')
+          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/${TAG_NAME}"
+          
+          # 读取 RELEASE_NOTES.md 并替换占位符
+          sed -e "s/{{VERSION}}/${TAG_NAME}/g" \
+              -e "s/{{DATE}}/${DATE}/g" \
+              -e "s/{{FIRMWARE_VERSION}}/${VERSION}/g" \
+              -e "s|{{RELEASE_URL}}|${RELEASE_URL}|g" \
+              RELEASE_NOTES.md > release_body.md
+          
+          echo "Release notes prepared successfully"
+      
       - name: Build MOTORS_4 version
         uses: espressif/esp-idf-ci-action@v1
         with:
@@ -63,17 +80,7 @@ jobs:
         with:
           tag_name: ${{ steps.tag.outputs.name }}
           name: Release ${{ steps.tag.outputs.name }}
-          body: |
-            ## 版本说明
-            
-            本次发布包含以下三个版本的固件：
-            - **MOTORS_4**: 4通道版本
-            - **MOTORS_6**: 6通道版本
-            - **MOTORS_8**: 8通道版本（其它）
-            
-            ## 使用说明
-            
-            请根据您的硬件配置选择对应的固件进行刷入。
+          body_path: release_body.md
           files: |
             Top-AMS-MOTORS_4.bin
             Top-AMS-MOTORS_6.bin
